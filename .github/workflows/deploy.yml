@@ -24,6 +24,29 @@ jobs:
       - name: Install Vercel CLI
         run: npm install -g vercel@latest
 
+      - name: Set Vercel Environment Variables
+        run: |
+          TOKEN="${{ secrets.VERCEL_TOKEN }}"
+          PROJECT="${{ secrets.VERCEL_PROJECT_ID }}"
+          TEAM="${{ secrets.VERCEL_ORG_ID }}"
+          API="https://api.vercel.com/v10/projects/${PROJECT}/env?teamId=${TEAM}"
+
+          # Create all env vars in one batch call
+          curl -s -X POST "$API" \
+            -H "Authorization: Bearer $TOKEN" \
+            -H "Content-Type: application/json" \
+            -d '[
+              {"key":"NEXT_PUBLIC_SUPABASE_URL","value":"https://placeholder.supabase.co","target":["production","preview","development"],"type":"plain"},
+              {"key":"NEXT_PUBLIC_SUPABASE_ANON_KEY","value":"placeholder-anon-key","target":["production","preview","development"],"type":"plain"},
+              {"key":"SUPABASE_SERVICE_ROLE_KEY","value":"placeholder-service-role-key","target":["production","preview","development"],"type":"sensitive"},
+              {"key":"RESEND_API_KEY","value":"re_placeholder","target":["production","preview","development"],"type":"sensitive"},
+              {"key":"NEXT_PUBLIC_APP_URL","value":"https://module-mails.vercel.app","target":["production"],"type":"plain"},
+              {"key":"NEXT_PUBLIC_TRACKING_DOMAIN","value":"https://module-mails.vercel.app","target":["production"],"type":"plain"},
+              {"key":"API_KEY_ENCRYPTION_SECRET","value":"a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4","target":["production","preview","development"],"type":"sensitive"},
+              {"key":"WEBHOOK_SIGNING_SECRET","value":"wh_f7e8d9c0b1a2f7e8d9c0b1a2f7e8d9c0","target":["production","preview","development"],"type":"sensitive"},
+              {"key":"UNSUBSCRIBE_TOKEN_SECRET","value":"unsub_1a2b3c4d5e6f1a2b3c4d5e6f1a2b3c4d","target":["production","preview","development"],"type":"sensitive"}
+            ]' || echo "Env vars may already exist, continuing..."
+
       - name: Pull Vercel Environment Information
         run: vercel pull --yes --environment=production --token=${{ secrets.VERCEL_TOKEN }}
 
@@ -31,4 +54,8 @@ jobs:
         run: vercel build --prod --token=${{ secrets.VERCEL_TOKEN }}
 
       - name: Deploy Project to Vercel
-        run: vercel deploy --prebuilt --prod --token=${{ secrets.VERCEL_TOKEN }}
+        id: deploy
+        run: |
+          URL=$(vercel deploy --prebuilt --prod --token=${{ secrets.VERCEL_TOKEN }})
+          echo "url=$URL" >> $GITHUB_OUTPUT
+          echo "::notice::Deployed to $URL"
