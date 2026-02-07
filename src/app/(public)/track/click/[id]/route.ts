@@ -11,10 +11,10 @@ export async function GET(request: NextRequest, { params }: RouteParams) {
   const { id: trackingCode } = await params
   const url = new URL(request.url)
   const campaignEmailId = url.searchParams.get('e') ?? undefined
-  const originalUrl = url.searchParams.get('url') ?? '/'
+  const originalUrl = url.searchParams.get('url') ?? `${url.origin}/`
 
   // Always redirect — tracking must never fail visibly
-  const redirect = () => NextResponse.redirect(originalUrl, 301)
+  const redirect = () => NextResponse.redirect(originalUrl, 302)
 
   try {
     const supabase = createAdminClient()

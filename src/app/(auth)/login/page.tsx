@@ -41,6 +41,8 @@ export default function LoginPage() {
           setError('Invalid email or password.')
         } else if (signInError.message.includes('Email not confirmed')) {
           setError('Please verify your email address before signing in.')
+        } else if (signInError.message.includes('Failed to fetch') || signInError.message.includes('NetworkError')) {
+          setError('Unable to connect to the server. Please check your connection and try again.')
         } else {
           setError(signInError.message)
         }
