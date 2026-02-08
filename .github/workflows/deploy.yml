@@ -15,86 +15,33 @@ env:
 jobs:
   setup-database:
     runs-on: ubuntu-latest
+    env:
+      SUPABASE_ACCESS_TOKEN: sbp_ada2317fc276bb290be110c510d03b52a95c67e8
     steps:
       - uses: actions/checkout@v4
 
-      - name: Run database migration in chunks
-        run: |
-          TOKEN="sbp_ada2317fc276bb290be110c510d03b52a95c67e8"
-          API="https://api.supabase.com/v1/projects/${SUPABASE_PROJECT_REF}/database/query"
-          FILE="supabase/migrations/001_initial_schema.sql"
+      - name: Setup Supabase CLI
+        uses: supabase/setup-cli@v1
+        with:
+          version: latest
 
-          run_sql_file() {
-            local LABEL="$1"
-            local TMPFILE="$2"
-            echo "--- Running: ${LABEL} ($(wc -l < "$TMPFILE") lines) ---"
+      - name: Link Supabase project
+        run: supabase link --project-ref ${{ env.SUPABASE_PROJECT_REF }}
 
-            # Use --rawfile to properly escape SQL content including quotes
-            PAYLOAD=$(jq -n --rawfile q "$TMPFILE" '{"query": $q}')
-
-            RESPONSE=$(curl -s -w "\n%{http_code}" -X POST "$API" \
-              -H "Authorization: Bearer ${TOKEN}" \
-              -H "Content-Type: application/json" \
-              -d "$PAYLOAD")
-
-            HTTP_CODE=$(echo "$RESPONSE" | tail -1)
-            BODY=$(echo "$RESPONSE" | sed '$d')
-
-            if [ "$HTTP_CODE" = "201" ] || [ "$HTTP_CODE" = "200" ]; then
-              echo "  OK ($HTTP_CODE)"
-              return 0
-            else
-              echo "  Status: $HTTP_CODE"
-              echo "  Body: $(echo "$BODY" | head -c 800)"
-              if echo "$BODY" | grep -qi "already exists"; then
-                echo "  (already exists - continuing)"
-                return 0
-              fi
-              return 1
-            fi
-          }
-
-          # Split the migration file into chunk files
-          sed -n '1,108p' "$FILE" > /tmp/chunk1.sql
-          sed -n '109,158p' "$FILE" > /tmp/chunk2.sql
-          sed -n '159,500p' "$FILE" > /tmp/chunk3.sql
-          sed -n '501,846p' "$FILE" > /tmp/chunk4.sql
-          sed -n '847,921p' "$FILE" > /tmp/chunk5.sql
-          sed -n '922,999p' "$FILE" > /tmp/chunk6.sql
-          sed -n '1000,$p' "$FILE" > /tmp/chunk7.sql
-
-          FAILED=0
-          run_sql_file "Extensions + Enums" /tmp/chunk1.sql || FAILED=1
-          run_sql_file "Helper Functions" /tmp/chunk2.sql || FAILED=1
-          run_sql_file "Tables (part 1)" /tmp/chunk3.sql || FAILED=1
-          run_sql_file "Tables (part 2)" /tmp/chunk4.sql || FAILED=1
-          run_sql_file "Indexes" /tmp/chunk5.sql || FAILED=1
-          run_sql_file "Triggers" /tmp/chunk6.sql || FAILED=1
-          run_sql_file "RLS Policies" /tmp/chunk7.sql || FAILED=1
-
-          if [ "$FAILED" = "1" ]; then
-            echo "::error::Some migration steps failed - check output above"
-            exit 1
-          fi
-
-          echo "=== All migration chunks completed successfully! ==="
+      - name: Push database migrations
+        run: supabase db push
 
       - name: Verify tables
         run: |
-          TOKEN="sbp_ada2317fc276bb290be110c510d03b52a95c67e8"
-          echo 'SELECT tablename FROM pg_tables WHERE schemaname = '"'"'public'"'"' ORDER BY tablename;' > /tmp/verify.sql
+          echo "SELECT tablename FROM pg_tables WHERE schemaname = 'public' ORDER BY tablename;" > /tmp/verify.sql
           PAYLOAD=$(jq -n --rawfile q /tmp/verify.sql '{"query": $q}')
-
           RESPONSE=$(curl -s -X POST \
             "https://api.supabase.com/v1/projects/${SUPABASE_PROJECT_REF}/database/query" \
-            -H "Authorization: Bearer ${TOKEN}" \
+            -H "Authorization: Bearer ${SUPABASE_ACCESS_TOKEN}" \
             -H "Content-Type: application/json" \
             -d "$PAYLOAD")
-
           echo "=== Tables in database ==="
           echo "$RESPONSE" | jq -r '.[].tablename' 2>/dev/null || echo "$RESPONSE"
-          TABLE_COUNT=$(echo "$RESPONSE" | jq 'length' 2>/dev/null || echo "0")
-          echo "Total tables: $TABLE_COUNT"
 
   deploy:
     needs: setup-database
@@ -114,14 +61,12 @@ jobs:
       - name: Retrieve service role key from Supabase
         id: srk
         run: |
-          TOKEN="sbp_ada2317fc276bb290be110c510d03b52a95c67e8"
           RESPONSE=$(curl -s -X GET \
-            "https://api.supabase.com/v1/projects/${SUPABASE_PROJECT_REF}/api-keys" \
-            -H "Authorization: Bearer ${TOKEN}")
+            "https://api.supabase.com/v1/projects/${{ env.SUPABASE_PROJECT_REF }}/api-keys" \
+            -H "Authorization: Bearer sbp_ada2317fc276bb290be110c510d03b52a95c67e8")
           SRK=$(echo "$RESPONSE" | jq -r '.[] | select(.name=="service_role") | .api_key')
           echo "::add-mask::${SRK}"
           echo "key=${SRK}" >> $GITHUB_OUTPUT
-          echo "Service role key retrieved (masked)"
 
       - name: Update Vercel Environment Variables
         run: |
@@ -130,7 +75,7 @@ jobs:
           TEAM="${{ secrets.VERCEL_ORG_ID }}"
           SRK="${{ steps.srk.outputs.key }}"
 
-          # Delete existing env vars first
+          # Delete existing env vars
           EXISTING=$(curl -s "https://api.vercel.com/v9/projects/${PROJECT}/env?teamId=${TEAM}" \
             -H "Authorization: Bearer $TOKEN")
 
@@ -142,7 +87,7 @@ jobs:
             fi
           done
 
-          # Create env vars JSON file to avoid shell escaping issues
+          # Set new env vars using a file to avoid escaping issues
           jq -n \
             --arg url "${{ env.SUPABASE_URL }}" \
             --arg anon "${{ env.SUPABASE_ANON_KEY }}" \
@@ -159,8 +104,7 @@ jobs:
               {"key":"UNSUBSCRIBE_TOKEN_SECRET","value":"unsub_1a2b3c4d5e6f1a2b3c4d5e6f1a2b3c4d5e6f1a2b3c","target":["production","preview","development"],"type":"sensitive"}
             ]' > /tmp/env-vars.json
 
-          API="https://api.vercel.com/v10/projects/${PROJECT}/env?teamId=${TEAM}"
-          curl -s -X POST "$API" \
+          curl -s -X POST "https://api.vercel.com/v10/projects/${PROJECT}/env?teamId=${TEAM}" \
             -H "Authorization: Bearer $TOKEN" \
             -H "Content-Type: application/json" \
             -d @/tmp/env-vars.json && echo "Environment variables updated!"
