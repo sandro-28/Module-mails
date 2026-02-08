@@ -44,3 +44,6 @@ next-env.d.ts
 .vscode/
 *.swp
 *.swo
+
+# MCP config (contains secrets)
+.mcp.json
