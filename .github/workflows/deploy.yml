@@ -22,74 +22,74 @@ jobs:
         run: |
           TOKEN="sbp_ada2317fc276bb290be110c510d03b52a95c67e8"
           API="https://api.supabase.com/v1/projects/${SUPABASE_PROJECT_REF}/database/query"
+          FILE="supabase/migrations/001_initial_schema.sql"
 
-          run_sql() {
+          run_sql_file() {
             local LABEL="$1"
-            local SQL="$2"
-            echo "--- Running: ${LABEL} ---"
+            local TMPFILE="$2"
+            echo "--- Running: ${LABEL} ($(wc -l < "$TMPFILE") lines) ---"
+
+            # Use --rawfile to properly escape SQL content including quotes
+            PAYLOAD=$(jq -n --rawfile q "$TMPFILE" '{"query": $q}')
+
             RESPONSE=$(curl -s -w "\n%{http_code}" -X POST "$API" \
               -H "Authorization: Bearer ${TOKEN}" \
               -H "Content-Type: application/json" \
-              -d "$(jq -n --arg q "$SQL" '{query: $q}')")
+              -d "$PAYLOAD")
+
             HTTP_CODE=$(echo "$RESPONSE" | tail -1)
             BODY=$(echo "$RESPONSE" | sed '$d')
+
             if [ "$HTTP_CODE" = "201" ] || [ "$HTTP_CODE" = "200" ]; then
               echo "  OK ($HTTP_CODE)"
+              return 0
             else
               echo "  Status: $HTTP_CODE"
-              echo "  Body: $(echo "$BODY" | head -c 500)"
-              if echo "$BODY" | grep -q "already exists"; then
+              echo "  Body: $(echo "$BODY" | head -c 800)"
+              if echo "$BODY" | grep -qi "already exists"; then
                 echo "  (already exists - continuing)"
-              else
-                return 1
+                return 0
               fi
+              return 1
             fi
           }
 
-          # Split the migration file at section markers and run each part
-          FULL_SQL=$(cat supabase/migrations/001_initial_schema.sql)
-
-          # Extract sections by line numbers
-          # Section 1+2: Extensions + Enums (lines 1-108)
-          SEC1=$(sed -n '1,108p' supabase/migrations/001_initial_schema.sql)
-          # Section 3: Helper functions (lines 109-158)
-          SEC2=$(sed -n '109,158p' supabase/migrations/001_initial_schema.sql)
-          # Section 4a: Tables part 1 - first 10 tables (lines 159-500)
-          SEC3=$(sed -n '159,500p' supabase/migrations/001_initial_schema.sql)
-          # Section 4b: Tables part 2 - remaining tables (lines 501-846)
-          SEC4=$(sed -n '501,846p' supabase/migrations/001_initial_schema.sql)
-          # Section 5: Indexes (lines 847-921)
-          SEC5=$(sed -n '847,921p' supabase/migrations/001_initial_schema.sql)
-          # Section 6+7: Triggers (lines 922-999)
-          SEC6=$(sed -n '922,999p' supabase/migrations/001_initial_schema.sql)
-          # Section 8: RLS (lines 1000-end)
-          SEC7=$(sed -n '1000,$p' supabase/migrations/001_initial_schema.sql)
+          # Split the migration file into chunk files
+          sed -n '1,108p' "$FILE" > /tmp/chunk1.sql
+          sed -n '109,158p' "$FILE" > /tmp/chunk2.sql
+          sed -n '159,500p' "$FILE" > /tmp/chunk3.sql
+          sed -n '501,846p' "$FILE" > /tmp/chunk4.sql
+          sed -n '847,921p' "$FILE" > /tmp/chunk5.sql
+          sed -n '922,999p' "$FILE" > /tmp/chunk6.sql
+          sed -n '1000,$p' "$FILE" > /tmp/chunk7.sql
 
           FAILED=0
-          run_sql "Extensions + Enums" "$SEC1" || FAILED=1
-          run_sql "Helper Functions" "$SEC2" || FAILED=1
-          run_sql "Tables (part 1)" "$SEC3" || FAILED=1
-          run_sql "Tables (part 2)" "$SEC4" || FAILED=1
-          run_sql "Indexes" "$SEC5" || FAILED=1
-          run_sql "Triggers" "$SEC6" || FAILED=1
-          run_sql "RLS Policies" "$SEC7" || FAILED=1
+          run_sql_file "Extensions + Enums" /tmp/chunk1.sql || FAILED=1
+          run_sql_file "Helper Functions" /tmp/chunk2.sql || FAILED=1
+          run_sql_file "Tables (part 1)" /tmp/chunk3.sql || FAILED=1
+          run_sql_file "Tables (part 2)" /tmp/chunk4.sql || FAILED=1
+          run_sql_file "Indexes" /tmp/chunk5.sql || FAILED=1
+          run_sql_file "Triggers" /tmp/chunk6.sql || FAILED=1
+          run_sql_file "RLS Policies" /tmp/chunk7.sql || FAILED=1
 
           if [ "$FAILED" = "1" ]; then
-            echo "::error::Some migration steps failed"
+            echo "::error::Some migration steps failed - check output above"
             exit 1
           fi
 
-          echo "=== Migration completed successfully! ==="
+          echo "=== All migration chunks completed successfully! ==="
 
       - name: Verify tables
         run: |
           TOKEN="sbp_ada2317fc276bb290be110c510d03b52a95c67e8"
+          echo 'SELECT tablename FROM pg_tables WHERE schemaname = '"'"'public'"'"' ORDER BY tablename;' > /tmp/verify.sql
+          PAYLOAD=$(jq -n --rawfile q /tmp/verify.sql '{"query": $q}')
 
           RESPONSE=$(curl -s -X POST \
             "https://api.supabase.com/v1/projects/${SUPABASE_PROJECT_REF}/database/query" \
             -H "Authorization: Bearer ${TOKEN}" \
             -H "Content-Type: application/json" \
-            -d '{"query": "SELECT tablename FROM pg_tables WHERE schemaname = '\''public'\'' ORDER BY tablename;"}')
+            -d "$PAYLOAD")
 
           echo "=== Tables in database ==="
           echo "$RESPONSE" | jq -r '.[].tablename' 2>/dev/null || echo "$RESPONSE"
@@ -131,23 +131,19 @@ jobs:
           SRK="${{ steps.srk.outputs.key }}"
 
           # Delete existing env vars first
-          echo "=== Cleaning old env vars ==="
           EXISTING=$(curl -s "https://api.vercel.com/v9/projects/${PROJECT}/env?teamId=${TEAM}" \
             -H "Authorization: Bearer $TOKEN")
 
           for KEY in NEXT_PUBLIC_SUPABASE_URL NEXT_PUBLIC_SUPABASE_ANON_KEY SUPABASE_SERVICE_ROLE_KEY NEXT_PUBLIC_APP_URL NEXT_PUBLIC_TRACKING_DOMAIN API_KEY_ENCRYPTION_SECRET WEBHOOK_SIGNING_SECRET UNSUBSCRIBE_TOKEN_SECRET RESEND_API_KEY; do
             ENV_ID=$(echo "$EXISTING" | jq -r ".envs[] | select(.key==\"$KEY\") | .id" 2>/dev/null)
             if [ -n "$ENV_ID" ] && [ "$ENV_ID" != "null" ]; then
-              echo "Removing old $KEY..."
               curl -s -X DELETE "https://api.vercel.com/v9/projects/${PROJECT}/env/${ENV_ID}?teamId=${TEAM}" \
                 -H "Authorization: Bearer $TOKEN" > /dev/null
             fi
           done
 
-          echo "=== Setting real environment variables ==="
-          API="https://api.vercel.com/v10/projects/${PROJECT}/env?teamId=${TEAM}"
-
-          JSON=$(jq -n \
+          # Create env vars JSON file to avoid shell escaping issues
+          jq -n \
             --arg url "${{ env.SUPABASE_URL }}" \
             --arg anon "${{ env.SUPABASE_ANON_KEY }}" \
             --arg srk "$SRK" \
@@ -161,12 +157,13 @@ jobs:
               {"key":"API_KEY_ENCRYPTION_SECRET","value":"a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4e5f6","target":["production","preview","development"],"type":"sensitive"},
               {"key":"WEBHOOK_SIGNING_SECRET","value":"wh_f7e8d9c0b1a2f7e8d9c0b1a2f7e8d9c0b1a2f7e8d9c0","target":["production","preview","development"],"type":"sensitive"},
               {"key":"UNSUBSCRIBE_TOKEN_SECRET","value":"unsub_1a2b3c4d5e6f1a2b3c4d5e6f1a2b3c4d5e6f1a2b3c","target":["production","preview","development"],"type":"sensitive"}
-            ]')
+            ]' > /tmp/env-vars.json
 
+          API="https://api.vercel.com/v10/projects/${PROJECT}/env?teamId=${TEAM}"
           curl -s -X POST "$API" \
             -H "Authorization: Bearer $TOKEN" \
             -H "Content-Type: application/json" \
-            -d "$JSON" && echo "Environment variables updated!"
+            -d @/tmp/env-vars.json && echo "Environment variables updated!"
 
       - name: Pull Vercel Environment Information
         run: vercel pull --yes --environment=production --token=${{ secrets.VERCEL_TOKEN }}
