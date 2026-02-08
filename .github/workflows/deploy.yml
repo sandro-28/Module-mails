@@ -18,35 +18,68 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - name: Run database migration
+      - name: Run database migration in chunks
         run: |
           TOKEN="sbp_ada2317fc276bb290be110c510d03b52a95c67e8"
+          API="https://api.supabase.com/v1/projects/${SUPABASE_PROJECT_REF}/database/query"
 
-          echo "=== Running MailForge database migration ==="
-          SQL=$(cat supabase/migrations/001_initial_schema.sql)
-
-          RESPONSE=$(curl -s -w "\nHTTP_CODE:%{http_code}" -X POST \
-            "https://api.supabase.com/v1/projects/${SUPABASE_PROJECT_REF}/database/query" \
-            -H "Authorization: Bearer ${TOKEN}" \
-            -H "Content-Type: application/json" \
-            -d "$(jq -n --arg q "$SQL" '{query: $q}')")
-
-          HTTP_CODE=$(echo "$RESPONSE" | grep "HTTP_CODE:" | cut -d: -f2)
-          BODY=$(echo "$RESPONSE" | grep -v "HTTP_CODE:")
-
-          echo "HTTP Status: $HTTP_CODE"
-
-          if [ "$HTTP_CODE" = "201" ] || [ "$HTTP_CODE" = "200" ]; then
-            echo "Migration executed successfully!"
-          else
-            echo "Response: $BODY"
-            if echo "$BODY" | grep -q "already exists"; then
-              echo "::warning::Some objects already exist - migration partially applied"
+          run_sql() {
+            local LABEL="$1"
+            local SQL="$2"
+            echo "--- Running: ${LABEL} ---"
+            RESPONSE=$(curl -s -w "\n%{http_code}" -X POST "$API" \
+              -H "Authorization: Bearer ${TOKEN}" \
+              -H "Content-Type: application/json" \
+              -d "$(jq -n --arg q "$SQL" '{query: $q}')")
+            HTTP_CODE=$(echo "$RESPONSE" | tail -1)
+            BODY=$(echo "$RESPONSE" | sed '$d')
+            if [ "$HTTP_CODE" = "201" ] || [ "$HTTP_CODE" = "200" ]; then
+              echo "  OK ($HTTP_CODE)"
             else
-              echo "::error::Migration failed"
-              exit 1
+              echo "  Status: $HTTP_CODE"
+              echo "  Body: $(echo "$BODY" | head -c 500)"
+              if echo "$BODY" | grep -q "already exists"; then
+                echo "  (already exists - continuing)"
+              else
+                return 1
+              fi
             fi
+          }
+
+          # Split the migration file at section markers and run each part
+          FULL_SQL=$(cat supabase/migrations/001_initial_schema.sql)
+
+          # Extract sections by line numbers
+          # Section 1+2: Extensions + Enums (lines 1-108)
+          SEC1=$(sed -n '1,108p' supabase/migrations/001_initial_schema.sql)
+          # Section 3: Helper functions (lines 109-158)
+          SEC2=$(sed -n '109,158p' supabase/migrations/001_initial_schema.sql)
+          # Section 4a: Tables part 1 - first 10 tables (lines 159-500)
+          SEC3=$(sed -n '159,500p' supabase/migrations/001_initial_schema.sql)
+          # Section 4b: Tables part 2 - remaining tables (lines 501-846)
+          SEC4=$(sed -n '501,846p' supabase/migrations/001_initial_schema.sql)
+          # Section 5: Indexes (lines 847-921)
+          SEC5=$(sed -n '847,921p' supabase/migrations/001_initial_schema.sql)
+          # Section 6+7: Triggers (lines 922-999)
+          SEC6=$(sed -n '922,999p' supabase/migrations/001_initial_schema.sql)
+          # Section 8: RLS (lines 1000-end)
+          SEC7=$(sed -n '1000,$p' supabase/migrations/001_initial_schema.sql)
+
+          FAILED=0
+          run_sql "Extensions + Enums" "$SEC1" || FAILED=1
+          run_sql "Helper Functions" "$SEC2" || FAILED=1
+          run_sql "Tables (part 1)" "$SEC3" || FAILED=1
+          run_sql "Tables (part 2)" "$SEC4" || FAILED=1
+          run_sql "Indexes" "$SEC5" || FAILED=1
+          run_sql "Triggers" "$SEC6" || FAILED=1
+          run_sql "RLS Policies" "$SEC7" || FAILED=1
+
+          if [ "$FAILED" = "1" ]; then
+            echo "::error::Some migration steps failed"
+            exit 1
           fi
+
+          echo "=== Migration completed successfully! ==="
 
       - name: Verify tables
         run: |
@@ -78,7 +111,7 @@ jobs:
       - name: Install Vercel CLI
         run: npm install -g vercel@latest
 
-      - name: Retrieve service role key
+      - name: Retrieve service role key from Supabase
         id: srk
         run: |
           TOKEN="sbp_ada2317fc276bb290be110c510d03b52a95c67e8"
@@ -88,6 +121,7 @@ jobs:
           SRK=$(echo "$RESPONSE" | jq -r '.[] | select(.name=="service_role") | .api_key')
           echo "::add-mask::${SRK}"
           echo "key=${SRK}" >> $GITHUB_OUTPUT
+          echo "Service role key retrieved (masked)"
 
       - name: Update Vercel Environment Variables
         run: |
@@ -113,7 +147,6 @@ jobs:
           echo "=== Setting real environment variables ==="
           API="https://api.vercel.com/v10/projects/${PROJECT}/env?teamId=${TEAM}"
 
-          # Build JSON with jq to avoid hardcoding the service role key
           JSON=$(jq -n \
             --arg url "${{ env.SUPABASE_URL }}" \
             --arg anon "${{ env.SUPABASE_ANON_KEY }}" \
