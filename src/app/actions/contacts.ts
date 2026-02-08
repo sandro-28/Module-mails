@@ -68,8 +68,8 @@ const updateContactSchema = z.object({
   phone: z.string().optional(),
   company: z.string().optional(),
   job_title: z.string().optional(),
-  city: z.string().optional(),
-  country: z.string().optional(),
+  geo_city: z.string().optional(),
+  geo_country: z.string().optional(),
   status: z
     .enum(["active", "unsubscribed", "bounced", "complained", "pending", "cleaned"])
     .optional(),

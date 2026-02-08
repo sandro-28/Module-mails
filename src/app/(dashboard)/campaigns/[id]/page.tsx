@@ -146,7 +146,7 @@ export default async function CampaignDetailPage({
         <div className="flex gap-2">
           {isDraft && (
             <Button asChild>
-              <Link href={`/campaigns/${campaign.id}`}>
+              <Link href={`/campaigns/new?edit=${campaign.id}`}>
                 <Edit className="h-4 w-4" />
                 Edit Campaign
               </Link>

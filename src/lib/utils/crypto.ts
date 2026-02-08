@@ -8,7 +8,9 @@ export function generateApiKey(): { key: string; prefix: string; hash: string } 
 }
 
 export function hashApiKey(key: string): string {
-  return createHmac('sha256', process.env.API_KEY_ENCRYPTION_SECRET || 'default-secret')
+  const secret = process.env.API_KEY_ENCRYPTION_SECRET
+  if (!secret) throw new Error('API_KEY_ENCRYPTION_SECRET environment variable is required')
+  return createHmac('sha256', secret)
     .update(key)
     .digest('hex')
 }
@@ -22,8 +24,10 @@ export function signWebhookPayload(payload: string, secret: string): string {
 }
 
 export function generateUnsubscribeToken(contactId: string, campaignId: string): string {
+  const secret = process.env.UNSUBSCRIBE_TOKEN_SECRET
+  if (!secret) throw new Error('UNSUBSCRIBE_TOKEN_SECRET environment variable is required')
   const data = `${contactId}:${campaignId}:${Date.now()}`
-  return createHmac('sha256', process.env.UNSUBSCRIBE_TOKEN_SECRET || 'default-secret')
+  return createHmac('sha256', secret)
     .update(data)
     .digest('hex')
 }

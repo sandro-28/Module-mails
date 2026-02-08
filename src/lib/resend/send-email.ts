@@ -89,7 +89,7 @@ export async function sendBatchEmails(
       subject: email.subject,
       html: email.html,
       text: email.text,
-      reply_to: email.replyTo,
+      replyTo: email.replyTo,
       headers,
       tags: email.tags,
     }

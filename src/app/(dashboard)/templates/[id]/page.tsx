@@ -1,5 +1,5 @@
 import Link from "next/link"
-import { notFound } from "next/navigation"
+import { notFound, redirect } from "next/navigation"
 import {
   ArrowLeft,
   Calendar,
@@ -13,6 +13,7 @@ import {
   Tag,
 } from "lucide-react"
 import { createClient } from "@/lib/supabase/server"
+import { duplicateTemplate } from "@/app/actions/templates"
 import { Button } from "@/components/ui/button"
 import { Badge } from "@/components/ui/badge"
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card"
@@ -150,12 +151,16 @@ export default async function TemplateDetailPage({
               Edit Template
             </Link>
           </Button>
-          <Button variant="outline" asChild>
-            <Link href={`/templates/${template.id}/edit`}>
+          <form action={async () => {
+            "use server"
+            const copy = await duplicateTemplate(template.id)
+            redirect(`/templates/${copy.id}/edit`)
+          }}>
+            <Button type="submit" variant="outline">
               <Copy className="h-4 w-4" />
               Duplicate
-            </Link>
-          </Button>
+            </Button>
+          </form>
         </div>
       </div>
 
