@@ -1,0 +1,91 @@
+name: Setup Supabase Database
+on:
+  workflow_dispatch:
+
+jobs:
+  setup-database:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Run database migration via Supabase Management API
+        run: |
+          echo "=== Running MailForge database migration ==="
+
+          SQL=$(cat supabase/migrations/001_initial_schema.sql)
+
+          # Split SQL into chunks to avoid API payload limits
+          # First, run extensions and enums
+          RESPONSE=$(curl -s -w "\n%{http_code}" -X POST \
+            "https://api.supabase.com/v1/projects/${{ secrets.SUPABASE_PROJECT_REF }}/database/query" \
+            -H "Authorization: Bearer ${{ secrets.SUPABASE_ACCESS_TOKEN }}" \
+            -H "Content-Type: application/json" \
+            -d "$(jq -n --arg q "$SQL" '{query: $q}')")
+
+          HTTP_CODE=$(echo "$RESPONSE" | tail -1)
+          BODY=$(echo "$RESPONSE" | head -n -1)
+
+          echo "HTTP Status: $HTTP_CODE"
+
+          if [ "$HTTP_CODE" = "201" ] || [ "$HTTP_CODE" = "200" ]; then
+            echo "Migration executed successfully!"
+          else
+            echo "Migration response: $BODY"
+            # Try to show a more specific error
+            echo "$BODY" | jq -r '.message // .error // "Unknown error"' 2>/dev/null || echo "$BODY"
+            exit 1
+          fi
+
+      - name: Verify migration - list tables
+        run: |
+          RESPONSE=$(curl -s -X POST \
+            "https://api.supabase.com/v1/projects/${{ secrets.SUPABASE_PROJECT_REF }}/database/query" \
+            -H "Authorization: Bearer ${{ secrets.SUPABASE_ACCESS_TOKEN }}" \
+            -H "Content-Type: application/json" \
+            -d '{"query": "SELECT tablename FROM pg_tables WHERE schemaname = '\''public'\'' ORDER BY tablename;"}')
+
+          echo "=== Tables created ==="
+          echo "$RESPONSE" | jq -r '.[].tablename' 2>/dev/null || echo "$RESPONSE"
+
+      - name: Update Vercel env vars with real Supabase credentials
+        if: ${{ secrets.VERCEL_TOKEN != '' }}
+        run: |
+          TOKEN="${{ secrets.VERCEL_TOKEN }}"
+          PROJECT="${{ secrets.VERCEL_PROJECT_ID }}"
+          TEAM="${{ secrets.VERCEL_ORG_ID }}"
+
+          # First, delete existing placeholder env vars
+          echo "=== Fetching existing env vars ==="
+          EXISTING=$(curl -s "https://api.vercel.com/v9/projects/${PROJECT}/env?teamId=${TEAM}" \
+            -H "Authorization: Bearer $TOKEN")
+
+          # Delete Supabase-related vars to replace them
+          for KEY in NEXT_PUBLIC_SUPABASE_URL NEXT_PUBLIC_SUPABASE_ANON_KEY SUPABASE_SERVICE_ROLE_KEY; do
+            ENV_ID=$(echo "$EXISTING" | jq -r ".envs[] | select(.key==\"$KEY\") | .id" 2>/dev/null)
+            if [ -n "$ENV_ID" ] && [ "$ENV_ID" != "null" ]; then
+              echo "Deleting old $KEY ($ENV_ID)..."
+              curl -s -X DELETE "https://api.vercel.com/v9/projects/${PROJECT}/env/${ENV_ID}?teamId=${TEAM}" \
+                -H "Authorization: Bearer $TOKEN" > /dev/null
+            fi
+          done
+
+          # Set real Supabase credentials
+          echo "=== Setting real Supabase credentials ==="
+          curl -s -X POST "https://api.vercel.com/v10/projects/${PROJECT}/env?teamId=${TEAM}" \
+            -H "Authorization: Bearer $TOKEN" \
+            -H "Content-Type: application/json" \
+            -d '[
+              {"key":"NEXT_PUBLIC_SUPABASE_URL","value":"https://${{ secrets.SUPABASE_PROJECT_REF }}.supabase.co","target":["production","preview","development"],"type":"plain"},
+              {"key":"NEXT_PUBLIC_SUPABASE_ANON_KEY","value":"${{ secrets.SUPABASE_ANON_KEY }}","target":["production","preview","development"],"type":"plain"},
+              {"key":"SUPABASE_SERVICE_ROLE_KEY","value":"${{ secrets.SUPABASE_SERVICE_ROLE_KEY }}","target":["production","preview","development"],"type":"sensitive"}
+            ]' && echo "Supabase env vars updated on Vercel!"
+
+      - name: Trigger Vercel redeployment
+        if: ${{ secrets.VERCEL_TOKEN != '' }}
+        run: |
+          echo "=== Triggering redeployment ==="
+          npm install -g vercel@latest
+          vercel deploy --prod --token=${{ secrets.VERCEL_TOKEN }} \
+            --env VERCEL_ORG_ID=${{ secrets.VERCEL_ORG_ID }} \
+            --env VERCEL_PROJECT_ID=${{ secrets.VERCEL_PROJECT_ID }} || true
+          echo "Redeployment triggered - new env vars will be used"
